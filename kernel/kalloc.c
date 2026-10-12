@@ -30,6 +30,16 @@ kinit()
   freerange(end, (void*)PHYSTOP);
 }
 
+uint64
+freemem(){
+  struct run*r;
+  int pages=0;
+  for(r=kmem.freelist;r;r=r->next){
+    pages++;
+  }
+  return pages*PGSIZE;
+}
+
 void
 freerange(void *pa_start, void *pa_end)
 {
