@@ -64,6 +64,7 @@ void            ramdiskintr(void);
 void            ramdiskrw(struct buf*);
 
 // kalloc.c
+void            vmprint(pagetable_t pgt);
 void*           kalloc(void);
 void            kfree(void *);
 void            kinit(void);
@@ -159,12 +160,15 @@ int             uartgetc(void);
 
 // vm.c
 void            kvminit(void);
+pagetable_t     newkvminit(void);
+void            newkvmmap(pagetable_t, uint64, uint64, uint64, int);
 void            kvminithart(void);
 uint64          kvmpa(uint64);
 void            kvmmap(uint64, uint64, uint64, int);
 int             mappages(pagetable_t, uint64, uint64, uint64, int);
 pagetable_t     uvmcreate(void);
 void            uvminit(pagetable_t, uchar *, uint);
+void            freewalk2(pagetable_t pagetable,int index);
 uint64          uvmalloc(pagetable_t, uint64, uint64);
 uint64          uvmdealloc(pagetable_t, uint64, uint64);
 #ifdef SOL_COW

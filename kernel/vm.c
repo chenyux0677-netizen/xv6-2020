@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -14,6 +16,58 @@ pagetable_t kernel_pagetable;
 extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
+
+// 把用户页表 up 的 [oldsz, newsz) 同步映射进内核页表 kp
+void
+kvm_map_user(pagetable_t kp, pagetable_t up, uint64 oldsz, uint64 newsz)
+{
+  for(uint64 a = PGROUNDDOWN(oldsz); a < newsz; a += PGSIZE){
+    pte_t *pte = walk(up, a, 0);
+    if(pte == 0 || (*pte & PTE_V) == 0)
+      continue;                              // 未映射(如 guard page)就跳过
+    pte_t *kpte = walk(kp, a, 0);
+    if(kpte && (*kpte & PTE_V))
+      continue;                              // 已存在就别再 map,mappages 会 panic("remap")
+    mappages(kp, a, PGSIZE, PTE2PA(*pte), PTE_FLAGS(*pte) & ~PTE_U);  // ← 去掉 PTE_U
+  }
+}
+
+void
+kvm_unmap_user(pagetable_t kp, uint64 oldsz, uint64 newsz)
+{
+  for(uint64 a = PGROUNDDOWN(oldsz); a < PGROUNDDOWN(newsz); a += PGSIZE){
+    pte_t *pte = walk(kp, a, 0);
+    if(pte && (*pte & PTE_V))
+      *pte = 0;              // 只清映射,绝不 kfree —— 物理页归用户页表管
+  }
+}
+
+void
+toolprint(pagetable_t pagetable,int index)
+{
+  if(index==3){return;}
+  // there are 2^9 = 512 PTEs in a page table.
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pagetable[i];
+    if(pte & PTE_V){
+      // this PTE points to a lower-level page table.
+      uint64 child = PTE2PA(pte);
+      printf("..");
+      for(int j=0;j<index;j++){
+        printf(" ..");
+      }
+      printf("%d: pte %p pa %p\n",i,pte,child);
+      toolprint((pagetable_t)child,index+1);
+    } 
+  }
+}
+
+
+void
+vmprint(pagetable_t pgt){
+  printf("page table %p\n",pgt);
+  toolprint(pgt,0);
+}
 
 /*
  * create a direct-map page table for the kernel.
@@ -47,6 +101,42 @@ kvminit()
   kvmmap(TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
 }
 
+void
+newkvmmap(pagetable_t pgt, uint64 va, uint64 pa, uint64 sz, int perm)
+{
+  if(mappages(pgt, va, sz, pa, perm) != 0)
+    panic("newkvmmap");
+}
+
+pagetable_t
+newkvminit()
+{
+  pagetable_t kp = (pagetable_t) kalloc();
+  memset(kp, 0, PGSIZE);
+
+  // uart registers
+  newkvmmap(kp, UART0, UART0, PGSIZE, PTE_R | PTE_W);
+
+  // virtio mmio disk interface
+  newkvmmap(kp, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+
+  // CLINT
+  newkvmmap(kp, CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+
+  // PLIC
+  newkvmmap(kp, PLIC, PLIC, 0x400000, PTE_R | PTE_W);
+
+  // map kernel text executable and read-only.
+  newkvmmap(kp, KERNBASE, KERNBASE, (uint64)etext-KERNBASE, PTE_R | PTE_X);
+
+  // map kernel data and the physical RAM we'll make use of.
+  newkvmmap(kp, (uint64)etext, (uint64)etext, PHYSTOP-(uint64)etext, PTE_R | PTE_W);
+
+  // map the trampoline for trap entry/exit to
+  // the highest virtual address in the kernel.
+  newkvmmap(kp, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+  return kp;
+}
 // Switch h/w page table register to the kernel's page table,
 // and enable paging.
 void
@@ -132,7 +222,7 @@ kvmpa(uint64 va)
   pte_t *pte;
   uint64 pa;
   
-  pte = walk(kernel_pagetable, va, 0);
+  pte = walk(myproc()->kernel_pagetable, va, 0);
   if(pte == 0)
     panic("kvmpa");
   if((*pte & PTE_V) == 0)
@@ -289,6 +379,21 @@ freewalk(pagetable_t pagetable)
   kfree((void*)pagetable);
 }
 
+void
+freewalk2(pagetable_t pagetable,int index)
+{
+  // there are 2^9 = 512 PTEs in a page table.
+  if(index==3){return;}
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pagetable[i];
+    if(pte&PTE_V){
+    uint64 child = PTE2PA(pte);
+    freewalk2((pagetable_t)child,index+1);
+    pagetable[i] = 0;
+    }
+  }
+  kfree((void*)pagetable);
+}
 // Free user memory pages,
 // then free page-table pages.
 void
@@ -298,6 +403,7 @@ uvmfree(pagetable_t pagetable, uint64 sz)
     uvmunmap(pagetable, 0, PGROUNDUP(sz)/PGSIZE, 1);
   freewalk(pagetable);
 }
+
 
 // Given a parent process's page table, copy
 // its memory into a child's page table.
@@ -379,7 +485,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
-  uint64 n, va0, pa0;
+  /*uint64 n, va0, pa0;
 
   while(len > 0){
     va0 = PGROUNDDOWN(srcva);
@@ -395,7 +501,8 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
     dst += n;
     srcva = va0 + PGSIZE;
   }
-  return 0;
+  return 0;*/
+  return copyin_new(pagetable,dst,srcva,len);
 }
 
 // Copy a null-terminated string from user to kernel.
