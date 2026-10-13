@@ -60,6 +60,7 @@ sys_sleep(void)
 
   if(argint(0, &n) < 0)
     return -1;
+  backtrace();
   acquire(&tickslock);
   ticks0 = ticks;
   while(ticks - ticks0 < n){
@@ -94,4 +95,38 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+
+uint64
+sys_sigalarm(void)
+{
+  printf("workhere\n");
+  int ticks;
+  if(argint(0,&ticks)<0)
+    return -1;
+  uint64 p;
+  if(argaddr(1,&p)<0)
+    return -1;
+  //printf("%p\n",p);
+  if(p==0&&ticks==0)
+    myproc()->aset=0;  
+  else{
+    myproc()->ticks=ticks;
+    myproc()->handler=p;
+    myproc()->aset=1;
+  }
+
+  return 0;
+}
+
+uint64
+sys_sigreturn(void)
+{
+  printf("sys:b epc:%p\n",myproc()->trapframe->epc);
+  memmove(myproc()->trapframe,
+        &myproc()->backup_tf,
+        sizeof(struct trapframe));
+  printf("sys:a epc:%p\n",myproc()->trapframe->epc);
+  return 0;
 }
