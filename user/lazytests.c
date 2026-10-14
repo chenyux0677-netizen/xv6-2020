@@ -19,11 +19,15 @@ sparse_memory(char *s)
   if (prev_end == (char*)0xffffffffffffffffL) {
     printf("sbrk() failed\n");
     exit(1);
+  }else{
+    printf("here\n");
   }
   new_end = prev_end + REGION_SZ;
 
   for (i = prev_end + PGSIZE; i < new_end; i += 64 * PGSIZE)
     *(char **)i = i;
+
+  printf("here2\n");
 
   for (i = prev_end + PGSIZE; i < new_end; i += 64 * PGSIZE) {
     if (*(char **)i != i) {
@@ -31,6 +35,7 @@ sparse_memory(char *s)
       exit(1);
     }
   }
+  printf("here3\n");
 
   exit(0);
 }
@@ -137,7 +142,8 @@ main(int argc, char *argv[])
   };
     
   printf("lazytests starting\n");
-
+  //sparse_memory("lazy alloc");
+  //printf("finish\n");
   int fail = 0;
   for (struct test *t = tests; t->s != 0; t++) {
     if((n == 0) || strcmp(t->s, n) == 0) {
