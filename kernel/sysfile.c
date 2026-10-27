@@ -484,3 +484,70 @@ sys_pipe(void)
   }
   return 0;
 }
+
+
+uint64
+sys_mmap(void)
+{
+  uint64 length;
+  int prot;
+  int flags;
+  int fd;
+  struct file* file;
+  if(argaddr(1,&length)<0||argint(2,&prot)<0||argint(3,&flags)<0||argfd(4,&fd,&file)<0)
+    return 0xffffffffffffffff;
+  if(file->readable==0&&(prot&PROT_READ))
+    return 0xffffffffffffffff;
+  if(file->writable==0&&(prot&PROT_WRITE)&&(flags&MAP_SHARED))
+    return 0xffffffffffffffff;
+  int i=0;
+  for(i=0;i<16;i++){
+    if(myproc()->v.vma[i].used==0)
+      break;
+  }
+  if(i==16)
+    return 0xffffffffffffffff;
+  file->ref++;
+  uint64 addr=myproc()->v.top;
+  myproc()->v.vma[i].used=1;
+  myproc()->v.vma[i].prot=prot;
+  myproc()->v.vma[i].flags=flags;
+  myproc()->v.vma[i].file=file;
+  myproc()->v.vma[i].addr=addr;
+  myproc()->v.vma[i].end=addr+length;
+  myproc()->v.top=PGROUNDUP(addr+length);
+  return addr;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr;
+  int length;
+  if(argaddr(0,&addr)<0||argint(1,&length)<0)
+    return -1;
+  int i;
+  for(i=0;i<16;i++){
+    if(myproc()->v.vma[i].addr<=addr&&addr<myproc()->v.vma[i].end)
+      break;
+  }
+  if(i==16)
+    return -1;
+  if(length>myproc()->v.vma[i].end-myproc()->v.vma[i].addr)
+   length=myproc()->v.vma[i].end-myproc()->v.vma[i].addr;
+  if(myproc()->v.vma[i].flags&MAP_SHARED)
+    filewrite(myproc()->v.vma[i].file,addr,length);
+  uvmunmap(myproc()->pagetable,addr,length/PGSIZE,1);
+  if(myproc()->v.vma[i].addr==addr&&length==myproc()->v.vma[i].end-myproc()->v.vma[i].addr){
+    fileclose(myproc()->v.vma[i].file);
+    myproc()->v.vma[i].addr=0;
+    myproc()->v.vma[i].end=0;
+    myproc()->v.vma[i].used=0;
+  }else if(addr==myproc()->v.vma[i].addr) {
+    myproc()->v.vma[i].addr=addr+length;
+  }else{
+    myproc()->v.vma[i].end=addr;
+  }
+  
+  return 0;
+}

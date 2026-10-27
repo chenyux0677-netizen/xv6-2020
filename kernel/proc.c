@@ -5,7 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
-
+#include "fcntl.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
@@ -133,7 +136,10 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
-
+  p->v.top=MMAPBASE;
+  for(int i=0;i<16;i++){
+    p->v.vma[i].used=0;
+  }
   return p;
 }
 
@@ -289,7 +295,20 @@ fork(void)
 
   // Cause fork to return 0 in the child.
   np->trapframe->a0 = 0;
-
+  struct VMAM v;
+  v.top=p->v.top;
+  for(i=0;i<16;i++){
+    v.vma[i].used=p->v.vma[i].used;
+    if(p->v.vma[i].used){
+      v.vma[i].addr=p->v.vma[i].addr;
+      v.vma[i].end=p->v.vma[i].end;
+      p->v.vma[i].file->ref++;
+      v.vma[i].file=p->v.vma[i].file;
+      v.vma[i].flags=p->v.vma[i].flags;
+      v.vma[i].prot=p->v.vma[i].prot;
+    }
+  }
+  np->v=v;
   // increment reference counts on open file descriptors.
   for(i = 0; i < NOFILE; i++)
     if(p->ofile[i])
@@ -299,7 +318,7 @@ fork(void)
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
-
+ 
   np->state = RUNNABLE;
 
   release(&np->lock);
@@ -352,6 +371,22 @@ exit(int status)
       p->ofile[fd] = 0;
     }
   }
+  for(int i = 0; i < 16; i++){
+  struct VMA *v = &p->v.vma[i];
+  if(!v->used)
+    continue;
+
+  uint64 len = v->end - v->addr;
+  if((v->flags & MAP_SHARED) && (v->prot & PROT_WRITE)){
+      filewrite(v->file, v->addr, len);
+  }
+  uvmunmap(p->pagetable, v->addr, PGROUNDUP(len)/PGSIZE, 1);
+  fileclose(v->file);
+  v->used = 0;
+  v->addr = 0;
+  v->end = 0;
+  v->file = 0;
+}
 
   begin_op();
   iput(p->cwd);

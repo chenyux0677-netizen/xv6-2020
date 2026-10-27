@@ -5,6 +5,11 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fs.h"
+#include "sleeplock.h"
+#include "file.h"
+#include "fcntl.h"
+
 
 struct spinlock tickslock;
 uint ticks;
@@ -27,6 +32,15 @@ void
 trapinithart(void)
 {
   w_stvec((uint64)kernelvec);
+}
+
+int tool(int n){
+  int x=PTE_U;
+  if(n&PROT_READ)
+    x|=PTE_R;
+  if(n&PROT_WRITE)
+   x|=PTE_W;
+  return x;
 }
 
 //
@@ -65,6 +79,30 @@ usertrap(void)
     intr_on();
 
     syscall();
+  }else if(r_scause()==13||r_scause()==15){
+    uint64 va=r_stval();
+    uint64 va0=PGROUNDDOWN(va);
+    int i;
+    for(i=0;i<16;i++){
+      if(p->v.vma[i].used&&p->v.vma[i].addr<=va&&va<p->v.vma[i].end)
+        break;
+    }
+    if(i==16)
+      p->killed=1;
+    else{
+      char *mem=kalloc();
+      if(mem==0)
+        panic("???");
+      memset(mem,0,PGSIZE);
+      if(mappages(p->pagetable,va0,PGSIZE,(uint64)mem,tool(p->v.vma[i].prot))!=0)
+       panic("!!!!");
+      struct inode *ip =p->v.vma[i].file->ip;
+      uint off=va0-p->v.vma[i].addr;
+      ilock(ip);
+      readi(ip,1,va0,off,PGSIZE);
+      iunlock(ip);
+      
+    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
